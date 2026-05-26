@@ -1,0 +1,55 @@
+[Unit]
+Description=RTCM v3 to MAVLink GPS_RTCM_DATA Bridge
+Documentation=https://github.com/keeejinnn/rtcm_serial_to_mavlink
+# Wait for the RTCM serial device to be enumerated by the kernel before
+# starting.  __RTCM_DEVICE__ is replaced by install_service.sh with the
+# escaped systemd device unit for the configured RTCM port
+# (e.g. dev-ttyACM0.device for /dev/ttyACM0).
+# Wants= (not Requires=) so a missing device at boot delays start but does
+# not permanently prevent it; the bridge reconnects internally if the device
+# disappears and reappears at runtime.
+After=sysinit.target local-fs.target __RTCM_DEVICE__
+Wants=__RTCM_DEVICE__
+# If a network MAVLink target is used, add: After=network-online.target
+
+[Service]
+Type=simple
+
+# --- Identity ---
+# Replaced by install_service.sh with the deploying user's name.
+User=__USER__
+# dialout gives access to /dev/ttyACM* and /dev/ttyUSB* without root.
+SupplementaryGroups=dialout
+
+# --- Paths ---
+WorkingDirectory=__HOME__/rtcm_serial_to_mavlink
+
+# Adjust the CLI arguments below to match your hardware.
+# --rtcm-port   : serial port that carries the RTCM stream
+# --rtcm-baud   : baud rate of that port
+# --mavlink-udp : where ArduPilot is listening (udpout sends to the target)
+ExecStart=__HOME__/rtcm_serial_to_mavlink/.venv/bin/python \
+    __HOME__/rtcm_serial_to_mavlink/rtcm_bridge.py \
+    --rtcm-port /dev/ttyACM0 \
+    --rtcm-baud 115200 \
+    --mavlink-udp udpout:127.0.0.1:14550
+
+# --- Restart policy ---
+# Restart on any non-success exit so the bridge recovers from fatal errors.
+Restart=on-failure
+RestartSec=5s
+# Limit restart storm: no more than 5 restarts in 60 s.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rtcm_bridge
+
+# --- Hardening (optional, safe on Ubuntu/JetPack) ---
+# Prevent the service from acquiring new privileges.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
