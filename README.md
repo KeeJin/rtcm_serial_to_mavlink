@@ -1,9 +1,10 @@
 # rtcm_serial_to_mavlink
 
-Bridge RTCM v3 correction data from a mixed serial byte stream into MAVLink
+Bridge RTCM v3 correction data from a mixed byte stream into MAVLink
 `GPS_RTCM_DATA` messages (ID 233) for ArduPilot.  Runs on any Linux system
-with Python 3 and a serial port; the included systemd unit deploys it as a
-persistent background service.
+with Python 3 and either a local serial port or a TCP socket carrying raw
+RTCM bytes; the included systemd unit deploys it as a persistent background
+service.
 
 ---
 
@@ -25,8 +26,8 @@ persistent background service.
 ## How it works
 
 ```
-Serial port  ──►  RTCMSerialReader  ──►  MAVLinkRTCMForwarder  ──►  ArduPilot
-(mixed binary)   (pyrtcm parser)        (GPS_RTCM_DATA / MAVLink 2)
+Serial port or TCP socket ──► RTCMSerialReader ──► MAVLinkRTCMForwarder ──► ArduPilot
+(mixed binary stream)         (pyrtcm parser)      (GPS_RTCM_DATA / MAVLink 2)
 ```
 
 `RTCMSerialReader` owns the pyserial connection and feeds raw bytes into
@@ -89,6 +90,24 @@ python rtcm_bridge.py \
   --mavlink-udp udpout:127.0.0.1:14550
 ```
 
+**TCP input (RTCM coming from another computer over the network):**
+
+If another machine is forwarding the RTCM stream with `socat` or a similar TCP
+bridge, point the bridge at that socket:
+
+```bash
+python rtcm_bridge.py \
+  --rtcm-tcp 192.168.100.4:3000 \
+  --rtcm-baud 115200 \
+  --mavlink-udp udpout:127.0.0.1:14550
+```
+
+That works with a sender like:
+
+```bash
+sudo socat -d -d FILE:/dev/ttyACM0,b115200,raw TCP:192.168.100.4:3000
+```
+
 **Serial output (direct UART to flight controller):**
 
 ```bash
@@ -125,7 +144,8 @@ Debug output example:
 
 | Flag | Required | Default | Description |
 |---|---|---|---|
-| `--rtcm-port` | yes | — | Serial port carrying the RTCM stream (e.g. `/dev/ttyACM0`) |
+| `--rtcm-port` | one of | — | Local serial port carrying the RTCM stream (e.g. `/dev/ttyACM0`) |
+| `--rtcm-tcp` | one of | — | TCP endpoint carrying the RTCM stream in `host:port` form (e.g. `192.168.100.4:3000`) |
 | `--rtcm-baud` | yes | — | Baud rate of the RTCM serial port |
 | `--mavlink-udp` | one of | — | MAVLink UDP endpoint (e.g. `udpout:127.0.0.1:14550`) |
 | `--mavlink-serial` | one of | — | MAVLink output serial port (e.g. `/dev/ttyACM0`) |
@@ -134,6 +154,7 @@ Debug output example:
 | `--source-component` | no | `191` | MAVLink source component ID |
 | `--debug` | no | off | Enable DEBUG-level logging |
 
+`--rtcm-port` and `--rtcm-tcp` are mutually exclusive; exactly one is required.
 `--mavlink-udp` and `--mavlink-serial` are mutually exclusive; exactly one is required.
 
 ---

@@ -37,7 +37,8 @@ MAVLINK_RTCM_MAX_FRAME_LEN = MAVLINK_RTCM_MAX_DATA_LEN * MAVLINK_RTCM_MAX_FRAGME
 class BridgeConfig:
     """Runtime configuration for the RTCM bridge."""
 
-    rtcm_port: str
+    rtcm_port: Optional[str]
+    rtcm_tcp: Optional[str]
     rtcm_baud: int
     mavlink_udp: Optional[str]
     mavlink_serial: Optional[str]
@@ -60,12 +61,14 @@ class RTCMSerialReader:
 
     def __init__(
         self,
-        port: str,
+        port: Optional[str],
+        tcp_endpoint: Optional[str],
         baudrate: int,
         reconnect_delay_s: float = 2.0,
         timeout_s: float = 1.0,
     ) -> None:
         self._port = port
+        self._tcp_endpoint = tcp_endpoint
         self._baudrate = baudrate
         self._reconnect_delay_s = reconnect_delay_s
         self._timeout_s = timeout_s
@@ -77,15 +80,27 @@ class RTCMSerialReader:
         """Open serial port and initialize RTCMReader, retrying until success."""
         while True:
             try:
-                LOGGER.info("[RTCM] connecting serial=%s baud=%d", self._port, self._baudrate)
-                self._serial = serial.Serial(
-                    port=self._port,
-                    baudrate=self._baudrate,
-                    timeout=self._timeout_s,
-                    write_timeout=self._timeout_s,
-                )
+                if self._tcp_endpoint is not None:
+                    LOGGER.info("[RTCM] connecting tcp=%s", self._tcp_endpoint)
+                    self._serial = serial.serial_for_url(
+                        f"socket://{self._tcp_endpoint}",
+                        timeout=self._timeout_s,
+                        write_timeout=self._timeout_s,
+                    )
+                else:
+                    assert self._port is not None
+                    LOGGER.info("[RTCM] connecting serial=%s baud=%d", self._port, self._baudrate)
+                    self._serial = serial.Serial(
+                        port=self._port,
+                        baudrate=self._baudrate,
+                        timeout=self._timeout_s,
+                        write_timeout=self._timeout_s,
+                    )
                 self._reader = RTCMReader(self._serial)
-                LOGGER.info("[RTCM] connected serial=%s", self._port)
+                if self._tcp_endpoint is not None:
+                    LOGGER.info("[RTCM] connected tcp=%s", self._tcp_endpoint)
+                else:
+                    LOGGER.info("[RTCM] connected serial=%s", self._port)
                 return
             except (serial.SerialException, OSError, ValueError, RuntimeError) as err:
                 LOGGER.warning("[RTCM] connect failed: %s; retrying in %.1fs", err, self._reconnect_delay_s)
@@ -398,7 +413,12 @@ def _parse_args(argv: Optional[list[str]] = None) -> BridgeConfig:
     parser = argparse.ArgumentParser(
         description="Bridge RTCM v3 from mixed serial stream to MAVLink GPS_RTCM_DATA."
     )
-    parser.add_argument("--rtcm-port", required=True, help="RTCM input serial port (e.g. /dev/ttyUSB0)")
+    rtcm_group = parser.add_mutually_exclusive_group(required=True)
+    rtcm_group.add_argument("--rtcm-port", help="RTCM input serial port (e.g. /dev/ttyUSB0)")
+    rtcm_group.add_argument(
+        "--rtcm-tcp",
+        help="RTCM input TCP endpoint in host:port form (e.g. 192.168.100.4:3000)",
+    )
     parser.add_argument("--rtcm-baud", required=True, type=int, help="RTCM input serial baudrate")
 
     out_group = parser.add_mutually_exclusive_group(required=True)
@@ -432,6 +452,7 @@ def _parse_args(argv: Optional[list[str]] = None) -> BridgeConfig:
     args = parser.parse_args(argv)
     return BridgeConfig(
         rtcm_port=args.rtcm_port,
+        rtcm_tcp=args.rtcm_tcp,
         rtcm_baud=args.rtcm_baud,
         mavlink_udp=args.mavlink_udp,
         mavlink_serial=args.mavlink_serial,
@@ -461,6 +482,7 @@ def run(config: BridgeConfig) -> int:
 
     reader = RTCMSerialReader(
         port=config.rtcm_port,
+        tcp_endpoint=config.rtcm_tcp,
         baudrate=config.rtcm_baud,
         reconnect_delay_s=config.reconnect_delay_s,
         timeout_s=config.serial_timeout_s,
