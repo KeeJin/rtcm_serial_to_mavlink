@@ -14,6 +14,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Generator, Optional, Tuple
@@ -44,6 +45,8 @@ class BridgeConfig:
     source_system: int
     source_component: int
     debug: bool
+    monitor_gps: bool = False
+    gps_log_interval_s: float = 1.0
     reconnect_delay_s: float = 2.0
     serial_timeout_s: float = 1.0
 
@@ -134,6 +137,8 @@ class MAVLinkRTCMForwarder:
         serial_baud: int,
         source_system: int,
         source_component: int,
+        monitor_gps: bool = False,
+        gps_log_interval_s: float = 1.0,
         reconnect_delay_s: float = 2.0,
     ) -> None:
         self._udp_endpoint = udp_endpoint
@@ -141,10 +146,17 @@ class MAVLinkRTCMForwarder:
         self._serial_baud = serial_baud
         self._source_system = source_system
         self._source_component = source_component
+        self._monitor_gps = monitor_gps
+        self._gps_log_interval_s = gps_log_interval_s
         self._reconnect_delay_s = reconnect_delay_s
 
         self._mav: Optional[mavutil.mavfile] = None
+        self._mav_lock = threading.Lock()
         self._frag_sequence_id = 0
+        self._gps_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._last_gps_state: Optional[tuple[str, Optional[int], Optional[int], Optional[int], Optional[int]]] = None
+        self._last_gps_log_ts = 0.0
 
     def _connect(self) -> None:
         """Connect to MAVLink transport, retrying when needed."""
@@ -152,7 +164,7 @@ class MAVLinkRTCMForwarder:
             try:
                 if self._udp_endpoint:
                     LOGGER.info("[MAVLINK] connecting udp=%s", self._udp_endpoint)
-                    self._mav = mavutil.mavlink_connection(
+                    mav_conn = mavutil.mavlink_connection(
                         self._udp_endpoint,
                         source_system=self._source_system,
                         source_component=self._source_component,
@@ -163,12 +175,14 @@ class MAVLinkRTCMForwarder:
                         self._serial_port,
                         self._serial_baud,
                     )
-                    self._mav = mavutil.mavlink_connection(
+                    mav_conn = mavutil.mavlink_connection(
                         self._serial_port,
                         baud=self._serial_baud,
                         source_system=self._source_system,
                         source_component=self._source_component,
                     )
+                with self._mav_lock:
+                    self._mav = mav_conn
                 LOGGER.info("[MAVLINK] connected")
                 return
             except (serial.SerialException, OSError, ValueError, RuntimeError) as err:
@@ -181,25 +195,122 @@ class MAVLinkRTCMForwarder:
 
     def _reset_connection(self) -> None:
         """Drop current MAVLink connection."""
-        if self._mav is not None:
-            with contextlib.suppress(OSError, serial.SerialException):
-                self._mav.close()
-        self._mav = None
+        with self._mav_lock:
+            if self._mav is not None:
+                with contextlib.suppress(OSError, serial.SerialException):
+                    self._mav.close()
+            self._mav = None
+
+    def _ensure_monitor_started(self) -> None:
+        """Start background GPS monitor thread if enabled."""
+        if not self._monitor_gps:
+            return
+        if self._gps_thread is not None and self._gps_thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._gps_thread = threading.Thread(target=self._gps_monitor_loop, name="gps-monitor", daemon=True)
+        self._gps_thread.start()
+
+        if self._udp_endpoint and self._udp_endpoint.startswith("udpout:"):
+            LOGGER.warning(
+                "[GPS] monitor enabled but mavlink endpoint '%s' is tx-only; "
+                "use 'udp:' or serial to receive GPS telemetry",
+                self._udp_endpoint,
+            )
+
+    def start(self) -> None:
+        """Initialize optional background tasks for this forwarder."""
+        self._ensure_monitor_started()
+
+    @staticmethod
+    def _fix_type_label(fix_type: Optional[int]) -> str:
+        """Human-friendly label for GPS fix type values."""
+        labels = {
+            0: "NO_GPS",
+            1: "NO_FIX",
+            2: "2D_FIX",
+            3: "3D_FIX",
+            4: "DGPS",
+            5: "RTK_FLOAT",
+            6: "RTK_FIXED",
+            7: "STATIC",
+            8: "PPP",
+        }
+        if fix_type is None:
+            return "UNKNOWN"
+        return labels.get(fix_type, f"UNKNOWN_{fix_type}")
+
+    def _log_gps_message(self, msg: object) -> None:
+        """Log GPS status transitions from incoming MAVLink telemetry."""
+        msg_type = getattr(msg, "get_type", lambda: "UNKNOWN")()
+        fix_type = getattr(msg, "fix_type", None)
+        sats = getattr(msg, "satellites_visible", None)
+        eph = getattr(msg, "eph", None)
+        epv = getattr(msg, "epv", None)
+
+        state = (msg_type, fix_type, sats, eph, epv)
+        now = time.time()
+        should_log = state != self._last_gps_state or (now - self._last_gps_log_ts) >= self._gps_log_interval_s
+        if not should_log:
+            return
+
+        self._last_gps_state = state
+        self._last_gps_log_ts = now
+        LOGGER.info(
+            "[GPS] msg=%s fix=%s(%s) sats=%s eph=%s epv=%s",
+            msg_type,
+            fix_type,
+            self._fix_type_label(fix_type),
+            sats,
+            eph,
+            epv,
+        )
+
+    def _gps_monitor_loop(self) -> None:
+        """Background loop that polls incoming MAVLink GPS telemetry."""
+        while not self._stop_event.is_set():
+            with self._mav_lock:
+                mav_conn = self._mav
+
+            if mav_conn is None:
+                self._stop_event.wait(0.2)
+                continue
+
+            try:
+                with self._mav_lock:
+                    msg = mav_conn.recv_match(type=["GPS_RAW_INT", "GPS2_RAW"], blocking=False)
+                if msg is not None:
+                    self._log_gps_message(msg)
+                else:
+                    self._stop_event.wait(0.1)
+            except (serial.SerialException, OSError, ValueError, RuntimeError) as err:
+                LOGGER.warning("[GPS] receive error: %s", err)
+                self._reset_connection()
+                self._stop_event.wait(0.5)
 
     def close(self) -> None:
         """Close active MAVLink connection."""
+        self._stop_event.set()
+        if self._gps_thread is not None and self._gps_thread.is_alive():
+            self._gps_thread.join(timeout=1.0)
         self._reset_connection()
 
     def _send_packet(self, flags: int, payload: bytes, payload_len: int, seq: int, frag_id: int) -> None:
         """Send one GPS_RTCM_DATA packet with zero-padded 180-byte payload."""
-        if self._mav is None:
-            self._connect()
+        with self._mav_lock:
+            mav_conn = self._mav
 
-        assert self._mav is not None  # For type-checkers.
+        if mav_conn is None:
+            self._connect()
+            with self._mav_lock:
+                mav_conn = self._mav
+
+        assert mav_conn is not None  # For type-checkers.
 
         # MAVLink requires a fixed 180-byte array in GPS_RTCM_DATA.data.
         data = payload + (b"\x00" * (MAVLINK_RTCM_MAX_DATA_LEN - payload_len))
-        self._mav.mav.gps_rtcm_data_send(flags, payload_len, data)
+        with self._mav_lock:
+            mav_conn.mav.gps_rtcm_data_send(flags, payload_len, data)
 
         if flags & 0x01:
             LOGGER.debug("[MAVLINK] sent seq=%d frag=%d len=%d", seq, frag_id, payload_len)
@@ -305,6 +416,17 @@ def _parse_args(argv: Optional[list[str]] = None) -> BridgeConfig:
     )
     parser.add_argument("--source-system", type=int, default=250, help="MAVLink source system ID")
     parser.add_argument("--source-component", type=int, default=191, help="MAVLink source component ID")
+    parser.add_argument(
+        "--monitor-gps",
+        action="store_true",
+        help="Log incoming MAVLink GPS status (GPS_RAW_INT/GPS2_RAW) from the same connection",
+    )
+    parser.add_argument(
+        "--gps-log-interval",
+        type=float,
+        default=1.0,
+        help="Minimum seconds between repeated GPS status logs when values are unchanged",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args(argv)
@@ -317,6 +439,8 @@ def _parse_args(argv: Optional[list[str]] = None) -> BridgeConfig:
         source_system=args.source_system,
         source_component=args.source_component,
         debug=args.debug,
+        monitor_gps=args.monitor_gps,
+        gps_log_interval_s=max(args.gps_log_interval, 0.1),
     )
 
 
@@ -347,8 +471,11 @@ def run(config: BridgeConfig) -> int:
         serial_baud=config.mavlink_baud,
         source_system=config.source_system,
         source_component=config.source_component,
+        monitor_gps=config.monitor_gps,
+        gps_log_interval_s=config.gps_log_interval_s,
         reconnect_delay_s=config.reconnect_delay_s,
     )
+    forwarder.start()
 
     try:
         for raw_frame, parsed_msg in reader.iter_rtcm_frames():
