@@ -15,11 +15,12 @@ service.
 3. [Installation](#installation)
 4. [CLI usage](#cli-usage)
 5. [CLI reference](#cli-reference)
-6. [Verifying the pipeline](#verifying-the-pipeline)
-7. [systemd service](#systemd-service)
-8. [MAVLink fragmentation](#mavlink-fragmentation)
-9. [Reliability and reconnect behaviour](#reliability-and-reconnect-behaviour)
-10. [Repository layout](#repository-layout)
+6. [ROS 2 usage](#ros-2-usage)
+7. [Verifying the pipeline](#verifying-the-pipeline)
+8. [systemd service](#systemd-service)
+9. [MAVLink fragmentation](#mavlink-fragmentation)
+10. [Reliability and reconnect behaviour](#reliability-and-reconnect-behaviour)
+11. [Repository layout](#repository-layout)
 
 ---
 
@@ -156,6 +157,81 @@ Debug output example:
 
 `--rtcm-port` and `--rtcm-tcp` are mutually exclusive; exactly one is required.
 `--mavlink-udp` and `--mavlink-serial` are mutually exclusive; exactly one is required.
+
+---
+
+## ROS 2 usage
+
+The repository includes a ROS 2 node named `rtcm_to_mavros_node` that reads
+RTCM from serial or TCP and publishes validated raw frames as
+`mavros_msgs/msg/RTCM`.
+
+### Build
+
+```bash
+# Put this repository in your ROS 2 workspace src directory first.
+cd ~/ros2_ws
+colcon build --packages-select rtcm_serial_to_mavlink
+source install/setup.bash
+```
+
+### Run with ros2 run
+
+Serial input example:
+
+```bash
+ros2 run rtcm_serial_to_mavlink rtcm_to_mavros_node --ros-args \
+  -p rtcm_port:=/dev/ttyACM0 \
+  -p rtcm_baud:=115200 \
+  -p output_topic:=/mavros/rtcm/send \
+  -p debug:=true
+```
+
+TCP input example:
+
+```bash
+ros2 run rtcm_serial_to_mavlink rtcm_to_mavros_node --ros-args \
+  -p rtcm_tcp:=192.168.100.202:3000 \
+  -p output_topic:=/mavros/rtcm/send \
+  -p debug:=true
+```
+
+Set exactly one of `rtcm_port` or `rtcm_tcp`.
+
+### Run with ros2 launch
+
+A launch file is provided at `launch/rtcm_to_mavros.launch.py`.
+
+Serial input example:
+
+```bash
+ros2 launch rtcm_serial_to_mavlink rtcm_to_mavros.launch.py \
+  rtcm_port:=/dev/ttyACM0 \
+  rtcm_baud:=115200 \
+  output_topic:=/mavros/rtcm/send \
+  debug:=true
+```
+
+TCP input example:
+
+```bash
+ros2 launch rtcm_serial_to_mavlink rtcm_to_mavros.launch.py \
+  rtcm_tcp:=192.168.100.202:3000 \
+  output_topic:=/mavros/rtcm/send \
+  debug:=true
+```
+
+### ROS 2 node parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `rtcm_port` | string | `""` | Local serial RTCM input path |
+| `rtcm_tcp` | string | `""` | TCP RTCM input endpoint in `host:port` format |
+| `rtcm_baud` | int | `115200` | Serial input baudrate |
+| `output_topic` | string | `/mavros/rtcm/send` | Destination topic for `mavros_msgs/msg/RTCM` |
+| `reconnect_delay_s` | double | `2.0` | Delay before reconnect attempts |
+| `serial_timeout_s` | double | `1.0` | Input read timeout |
+| `debug` | bool | `false` | Enable verbose RTCM logs |
 
 ---
 
@@ -361,6 +437,12 @@ If the MAVLink transport write fails:
 rtcm_serial_to_mavlink/
 ├── rtcm_bridge.py          # Main bridge program
 ├── requirements.txt        # Python dependencies
+├── package.xml             # ROS 2 package manifest
+├── setup.py                # ROS 2 Python package setup
+├── launch/
+│   └── rtcm_to_mavros.launch.py
+├── rtcm_serial_to_mavlink/
+│   └── rtcm_to_mavros_node.py
 ├── service/
 │   ├── rtcm_bridge.service # systemd unit template
 │   └── install_service.sh  # Service installer
