@@ -221,6 +221,46 @@ ros2 launch rtcm_serial_to_mavlink rtcm_to_mavros.launch.py \
   debug:=true
 ```
 
+Launch with MAVROS included in the same command:
+
+```bash
+ros2 launch rtcm_serial_to_mavlink rtcm_to_mavros.launch.py \
+  start_mavros:=true \
+  mavros_fcu_url:=/dev/ttyTHS1:57600 \
+  rtcm_tcp:=192.168.100.202:3000 \
+  output_topic:=/mavros/rtcm/send \
+  debug:=true
+```
+
+When `start_mavros:=true`, the launch file includes MAVROS and passes plugin
+and config YAML paths. The defaults are:
+
+- `config/mavros_pluginlists.yaml` (enables `gps_rtk` and `gps_status`)
+- `config/mavros_config.yaml` (basic connection tuning)
+
+Override them if your MAVROS installation uses a different plugin strategy:
+
+```bash
+ros2 launch rtcm_serial_to_mavlink rtcm_to_mavros.launch.py \
+  start_mavros:=true \
+  mavros_pluginlists_yaml:=/path/to/pluginlists.yaml \
+  mavros_config_yaml:=/path/to/config.yaml \
+  rtcm_port:=/dev/ttyACM0
+```
+
+Useful feedback topics for RTK state monitoring:
+
+- `/mavros/gpsstatus/gps1/raw`
+- `/mavros/gpsstatus/gps2/raw`
+- `/mavros/global_position/raw/fix`
+
+Example monitoring commands:
+
+```bash
+ros2 topic echo /mavros/gpsstatus/gps1/raw
+ros2 topic echo /mavros/global_position/raw/fix
+```
+
 ### ROS 2 node parameters
 
 | Parameter | Type | Default | Description |
@@ -232,6 +272,13 @@ ros2 launch rtcm_serial_to_mavlink rtcm_to_mavros.launch.py \
 | `reconnect_delay_s` | double | `2.0` | Delay before reconnect attempts |
 | `serial_timeout_s` | double | `1.0` | Input read timeout |
 | `debug` | bool | `false` | Enable verbose RTCM logs |
+| `start_mavros` (launch arg) | bool | `false` | Start MAVROS in same launch |
+| `mavros_fcu_url` (launch arg) | string | `/dev/ttyTHS1:57600` | FCU URL for MAVROS |
+| `mavros_gcs_url` (launch arg) | string | `""` | GCS URL for MAVROS |
+| `mavros_tgt_system` (launch arg) | string | `1` | MAVROS target system |
+| `mavros_tgt_component` (launch arg) | string | `1` | MAVROS target component |
+| `mavros_pluginlists_yaml` (launch arg) | string | package config path | Plugin list YAML passed to MAVROS |
+| `mavros_config_yaml` (launch arg) | string | package config path | General MAVROS config YAML |
 
 ---
 
@@ -441,6 +488,9 @@ rtcm_serial_to_mavlink/
 ├── setup.py                # ROS 2 Python package setup
 ├── launch/
 │   └── rtcm_to_mavros.launch.py
+├── config/
+│   ├── mavros_pluginlists.yaml
+│   └── mavros_config.yaml
 ├── rtcm_serial_to_mavlink/
 │   └── rtcm_to_mavros_node.py
 ├── service/

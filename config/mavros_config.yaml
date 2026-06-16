@@ -1,0 +1,5 @@
+/**:
+  ros__parameters:
+    # Conservative defaults for embedded FCU links.
+    conn_heartbeat: 5.0
+    conn_timeout: 10.0

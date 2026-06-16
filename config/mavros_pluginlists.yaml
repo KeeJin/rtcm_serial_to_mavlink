@@ -1,0 +1,7 @@
+/**:
+  ros__parameters:
+    # Keep default plugin loading behavior, but explicitly allow RTK-related plugins
+    # so RTCM ingestion and status feedback are available.
+    plugin_allowlist:
+      - gps_rtk
+      - gps_status
